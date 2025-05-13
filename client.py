@@ -1,3 +1,6 @@
+# ChatClient.py
+import hashlib
+import os
 import socket
 import threading
 import sys
@@ -12,6 +15,12 @@ def serialize(msg):
 def deserialize(blob):
     return pickle.loads(blob)
 
+def hash_pw(pw, salt=None):
+    if salt is None:
+        salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, 100_000, dklen=32)
+    return salt, dk
+
 def receive_loop(sock):
     while True:
         try:
@@ -19,13 +28,15 @@ def receive_loop(sock):
             msg   = deserialize(data)
             mtype = msg.get("type")
             body  = msg.get("body", "")
+            time  = msg.get("time")
+            username = msg.get("username")
+            frm = msg.get("from")
+
             if mtype == "GREETING_ACK":
-                frm = msg.get("from")
                 print(f"\n[{frm}]> {mtype} :👋 Greeting acknowledged, {body}")
                 print("You can now send messages. Type and press Enter (Ctrl+C to exit).")
             elif mtype == "MESSAGE":
-                frm  = msg.get("from")
-                print(f"<{frm}> {body}")
+                print(f"<{username}><{time}> {body}")
             elif mtype == "ERROR":
                 print(f"[Server] Error: {body.get('reason')}")
             else:
@@ -42,39 +53,73 @@ def start_client(server_ip, client_ip, server_port):
 
     # 1) Ask user to sign up or sign in
     while True:
-        sign_flag = int(input("\nDo you want to [1] Sign Up or [2] Sign In?"))
+        sign_flag = int(input("\nDo you want to [1] Sign Up or [2] Sign In? "))
         if sign_flag == 1:
-            print("SIGNUP:<username>:<password>")
+            # your existing signup flow (client-side hashing)
+            print("\nSIGNUP:<username>:<password>")
             text = input("SIGNUP:").split(":")
             username, password = text
-            msg = {"type":"SIGNUP", "body":{"username":username.strip(),"password":password.strip()}}
+            salt, dk = hash_pw(password.strip(), salt=None)
+            msg = {
+                "type": "SIGNUP",
+                "body": {
+                    "username": username.strip(),
+                    "salt": salt,
+                    "dh": dk
+                }
+            }
+            sock.sendto(serialize(msg), (server_ip, server_port))
+            data, _ = sock.recvfrom(BUFFER_SIZE)
+            resp = deserialize(data)
+            if resp["type"] == "SIGNUP_OK":
+                print(f"[Server:{resp['type']}] Sign-Up successful! Please sign in.")
+            else:
+                print(f"[Server:{resp['type']}] {resp.get('body',{})}")
+            continue
+
         else:
-            print("SIGNIN:<username>:<password>")
-            text = input("SIGNIN:").split(":")
-            username, password = text
-            msg = {"type":"SIGNIN", "body":{"username":username,"password":password}}
+            # ——— SIGNIN challenge–response ———
+            username = input("Username: ").strip()
+            password = getpass("Password: ").strip()
 
-        sock.sendto(serialize(msg), (server_ip, server_port))
+            # 1) ask server for our salt
+            sock.sendto(serialize({
+                "type": "SIGNIN_REQUEST",
+                "body": {"username": username}
+            }), (server_ip, server_port))
 
-        # wait for response
-        data, _ = sock.recvfrom(BUFFER_SIZE)
-        resp = deserialize(data)
-        if resp["type"] == "SIGNUP_OK":
-            print(f"\n{resp["type"]}: Sign-Up successful! Please sign in.")
-            sign_flag = 1
-            continue
-        if resp["type"] == "SIGNUP_FAIL":
-            print(f"{resp["type"]}: {resp["body"]["reason"]}")
-            continue
-        if resp["type"] == "SIGNIN_OK":
-            threading.Thread(target=receive_loop, args=(sock,), daemon=True).start()
-            print(f"\n{resp["type"]}: Sign-In successful!")
-            # send GREETING
-            sock.sendto(serialize({"type":"GREETING"}), (server_ip, server_port))
-            break
-        if resp["type"] == "SIGNIN_FAIL":
-            print(f"{resp["type"]}: {resp['body']['reason']}")
-            continue
+            # 2) receive salt (or fail)
+            data, _ = sock.recvfrom(BUFFER_SIZE)
+            resp = deserialize(data)
+            if resp["type"] != "SIGNIN_SALT":
+                print(f"[Server:{resp['type']}] {resp.get('body',{}).get('reason',"")}")
+                continue
+
+            salt = resp["body"]["salt"]
+            # 3) derive the same key on the client
+            _, dk = hash_pw(password, salt)
+
+            # 4) send only the derived key
+            sock.sendto(serialize({
+                "type": "SIGNIN_HASH",
+                "body": {
+                    "username": username,
+                    "hash": dk
+                }
+            }), (server_ip, server_port))
+
+            # 5) wait for OK/FAIL
+            data, _ = sock.recvfrom(BUFFER_SIZE)
+            resp = deserialize(data)
+            if resp["type"] == "SIGNIN_OK":
+                threading.Thread(target=receive_loop, args=(sock,), daemon=True).start()
+                print(f"\n[Server:{resp['type']}] Sign-In successful!")
+                # send GREETING
+                sock.sendto(serialize({"type":"GREETING"}), (server_ip, server_port))
+                break
+            else:
+                print(f"[Server:{resp['type']}] {resp.get('body',{}).get('reason',"")}")
+                continue
 
     # 2) Chat loop
     while True:
