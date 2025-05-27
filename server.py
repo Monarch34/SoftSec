@@ -55,7 +55,7 @@ def handle_packet(data, addr, sock):
         sock.sendto(serialize({"type":"ERROR","body":{"reason":"bad_data"}}), addr)
         return
 
-    # SIGNUP (unchanged)
+    # SIGNUP
     if mtype == "SIGNUP":
         resp = sign_up(body.get("username",""), [body.get("salt"), body.get("dh")])
         sock.sendto(serialize(resp), addr)
@@ -105,6 +105,7 @@ def handle_packet(data, addr, sock):
     # GREETING (only allowed if authenticated)
     if mtype == "GREETING":
         if key not in sessions:
+            sock.sendto(serialize({"type":"ERROR","body":{"reason":"not_authenticated"}}), addr)
             return
         username = sessions[key]["username"]
         welcome = {"type":"GREETING_ACK","from":"SERVER","body":f"Welcome, {username}!"}

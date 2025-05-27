@@ -68,6 +68,7 @@ def start_client(server_ip, client_ip, server_port):
                     "dh": dk
                 }
             }
+            print(msg)
             sock.sendto(serialize(msg), (server_ip, server_port))
             data, _ = sock.recvfrom(BUFFER_SIZE)
             resp = deserialize(data)
